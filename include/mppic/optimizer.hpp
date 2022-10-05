@@ -118,6 +118,11 @@ protected:
 
   bool fallback(bool fail);
 
+  /**
+   * @brief Applies a 5-point, Quadratic Savitsky Golay Filter
+   */
+  void savitskyGolayFilter();
+
 protected:
   rclcpp_lifecycle::LifecycleNode::WeakPtr parent_;
   std::shared_ptr<nav2_costmap_2d::Costmap2DROS> costmap_ros_;
@@ -134,6 +139,7 @@ protected:
 
   models::State state_;
   models::ControlSequence control_sequence_;
+  std::array<mppi::models::Control, 2> control_history_;
   models::Trajectories generated_trajectories_;
   models::Path path_;
   xt::xtensor<float, 1> costs_;

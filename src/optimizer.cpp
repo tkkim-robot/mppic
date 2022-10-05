@@ -103,6 +103,8 @@ void Optimizer::reset()
 {
   state_.reset(settings_.batch_size, settings_.time_steps);
   control_sequence_.reset(settings_.time_steps);
+  control_history_[0] = {0.0, 0.0, 0.0};
+  control_history_[1] = {0.0, 0.0, 0.0};
 
   costs_ = xt::zeros<float>({settings_.batch_size});
   generated_trajectories_.reset(settings_.batch_size, settings_.time_steps);
@@ -122,6 +124,8 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
     optimize();
   } while (fallback(critics_data_.fail_flag));
 
+  savitskyGolayFilter();
+
   auto control = getControlFromSequenceAsTwist(plan.header.stamp);
 
   if (settings_.shift_control_sequence) {
@@ -129,6 +133,79 @@ geometry_msgs::msg::TwistStamped Optimizer::evalControl(
   }
 
   return control;
+}
+
+void Optimizer::savitskyGolayFilter()
+{
+  // Quadratic, 5-point Coefficients
+  xt::xarray<float> filter = {-3.0, 12.0, 17.0, 12.0, -3.0};
+  filter /= 35.0;
+  const unsigned int & num_sequences = control_sequence_.vx.shape(0);
+
+  auto applyFilter = [&](const xt::xarray<float> & data) -> float {
+      return xt::sum(data * filter, {0}, immediate)();
+    };
+
+  // TODO cleanup the history passing
+  // TODO create new object to do this + reset method to set control history to 0 (control this internally)
+    // Needs: control_sequence_, settings_
+  auto applyFilterOverAxis =
+    [&](xt::xtensor<float, 1> & control_sequence, const float hist_0, const float hist_1) -> void
+    {
+      unsigned int idx = 0;
+      control_sequence(idx) = applyFilter({
+        hist_0,
+        hist_1,
+        control_sequence(idx),
+        control_sequence(idx + 1),
+        control_sequence(idx + 2)});
+
+      idx++;
+      control_sequence(idx) = applyFilter({
+        hist_1,
+        control_sequence(idx - 1),
+        control_sequence(idx),
+        control_sequence(idx + 1),
+        control_sequence(idx + 2)});
+
+      for (unsigned int idx = 2; idx != num_sequences - 2; idx++) {
+        control_sequence(idx) = applyFilter({
+          control_sequence(idx - 2),
+          control_sequence(idx - 1),
+          control_sequence(idx),
+          control_sequence(idx + 1),
+          control_sequence(idx + 2)});
+      }
+
+      idx++;
+      control_sequence(idx) = applyFilter({
+        control_sequence(idx - 2),
+        control_sequence(idx - 1),
+        control_sequence(idx),
+        control_sequence(idx + 1),
+        control_sequence(idx + 1)});
+
+      idx++;
+      control_sequence(idx) = applyFilter({
+        control_sequence(idx - 2),
+        control_sequence(idx - 1),
+        control_sequence(idx),
+        control_sequence(idx),
+        control_sequence(idx)});
+    };
+
+  // Filter trajectories
+  applyFilterOverAxis(control_sequence_.vx, control_history_[0].vx, control_history_[1].vx);
+  applyFilterOverAxis(control_sequence_.vy, control_history_[0].vy, control_history_[1].vy);
+  applyFilterOverAxis(control_sequence_.wz, control_history_[0].wz, control_history_[1].wz);
+
+  // Update control history
+  unsigned int offset = settings_.shift_control_sequence ? 1 : 0;
+  control_history_[0] = control_history_[1];
+  control_history_[1] = {
+    control_sequence_.vx(offset),
+    control_sequence_.vy(offset),
+    control_sequence_.wz(offset)};
 }
 
 void Optimizer::optimize()
